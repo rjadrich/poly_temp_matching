@@ -1,81 +1,96 @@
-import re
-from numpy import array, power, std, mean, unique, concatenate
-from numpy.random import shuffle
+from numpy import mean, array, unique, concatenate, power, std, abs
+from numpy.random import shuffle, rand
 from copy import deepcopy
+import re
 
-def ReadXYZ(filename, N, N_types, shuffle_data=True):
+def ReadXYZ(filename, shuffle_data=True, randomize=False, remove_types=[]):
     #regex used to parse the data
-    xyz_regex = r'(?:([a-zA-Z]+)\s+([0-9\.e\-\+]+)\s+([0-9\.e\-\+]+)\s+([0-9\.e\-\+]+)\s+([0-9\.e\-\+]+))'
+    xyz_regex = r'(?:([a-zA-Z]+)\s+([0-9\.e\-\+]+)\s+([0-9\.e\-\+]+)\s+([0-9\.e\-\+]+)\s+)'
     L_regex = r'(?:L\s*=\s*([0-9\.e\-\+]+))'
+    Ns = set([])
+    Ds = set([])
     
-    #read in the data and check for volume fraction consistency
-    eta_stats = []
-    L_stats = []
+    #read in the xyz file line by line and use regex to extract and build a new datastructure for the coordinates
     with open(filename, "r") as ins:
-        frames = [] #xyz and diameter
+        frames = []
         coords, coords_count = [], 0
-        diameters = []
         types = []
         L = None
         for line in ins:
             search = re.search(xyz_regex, line)
-            if search and coords_count < N:
+            if search:
                 coords.append(array([float(search.group(2)), float(search.group(3)), float(search.group(4))]))
-                diameters.append(2.0*float(search.group(5)))
                 types.append(search.group(1))
                 coords_count = coords_count + 1
             elif coords:
                 coords = array(coords)
-                diameters = array(diameters)
                 types = array(types)
-                sorter = diameters.argsort()
-                coords = coords[sorter]
-                diameters = diameters[sorter]
-                types = types[sorter]
-                frames.append({'coords': array(coords), 'diameters': array(diameters), 'types': array(types), 'L': L})
-                eta_stats.append(sum(power(diameters, 3.0)))
+                D = 3 - int(abs(max(coords[:,2]) - min(coords[:,2]))/L < 1e-10)
+                Ds.add(D)
+                Ns.add(len(coords))
+                
+                #replace with random positions if randomize is selected 
+                if randomize:
+                    coords = L*rand(len(coords), len(coords[0]))
+                frames.append({'coords': coords[:,0:D], 'types': types, 'L': L, 'D': D})
+                
+                #remove a component from the trajectory
+                for removal_type in remove_types:
+                    coords = coords[types == removal_type]
+                    types = types[types == removal_type]
+                
                 coords, coords_count = [], 0
-                diameters = []
                 types = []
                 L = None
+                
+                
                 search_L = re.search(L_regex, line)
                 if search_L:
                     L = float(search_L.group(1))
-                    L_stats.append(L)
             else:
                 search_L = re.search(L_regex, line)
                 if search_L:
                     L = float(search_L.group(1))
-                    L_stats.append(L)
                     
         #append final frame
-        coords = array(coords)
-        diameters = array(diameters)
-        types = array(types)
-        sorter = diameters.argsort()
-        coords = coords[sorter]
-        diameters = diameters[sorter]
-        types = types[sorter]
-        frames.append({'coords': array(coords), 'diameters': array(diameters), 'types': array(types), 'L': L})
-        eta_stats.append(sum(power(diameters, 3.0)))
+        if coords:
+            coords = array(coords)
+            types = array(types)
+            D = 3 - int(abs(max(coords[:,2]) - min(coords[:,2]))/L < 1e-10)
+            Ds.add(D)
+            Ns.add(len(coords))
+
+            #replace with random positions if randomize is selected 
+            if randomize:
+                coords = L*rand(len(coords), len(coords[0]))
+            frames.append({'coords': coords[:,0:D], 'types': types, 'L': L, 'D': D})
+
+            #remove a component from the trajectory
+            for removal_type in remove_types:
+                coords = coords[types == removal_type]
+                types = types[types == removal_type]
+
+            coords, coords_count = [], 0
+            types = []
+            L = None
         
-    #check that the volume fraction is consistent accross all frames
-    if (max(eta_stats)-min(eta_stats))/mean(eta_stats) > 0.0000000001:
-        raise Exception('Particle sizes seem inconsistent accross frames!!!')
+    #check that all of the frames contain the same number of particles
+    if len(Ns) != 1:
+        raise Exception('For some reason the reader did not identify the same number of particles for all frames.')
         
-    #check that the box size is consistent accross all frames
-    if (max(L_stats)-min(L_stats))/mean(L_stats) > 0.0000000001:
-        raise Exception('Box size seem inconsistent accross frames!!!')
-        
+    #check that all of the frames contain the same dimensionality
+    if len(Ds) != 1:
+        raise Exception('For some reason the reader did not identify the same dimensionality all frames.')
+         
     #perform random shuffle of identical particles coordinates to help facilitate learning    
     if shuffle_data:
         shuffled_frames = []
         for frame in frames:
             #extract local copies for organizational convenience
             coords = frame['coords']
-            diameters = frame['diameters']
             types = frame['types']
             L = frame['L']
+            D = frame['D']
             
             #prepare for shuffle
             coords_shuffled = None
@@ -95,18 +110,10 @@ def ReadXYZ(filename, N, N_types, shuffle_data=True):
                     coords_shuffled = concatenate((coords_shuffled, grouped), axis=0)
                 else:
                     coords_shuffled = deepcopy(grouped)
-            shuffled_frames.append({'coords': array(coords_shuffled), 'diameters': array(diameters), 'types': array(types), 'L': L})
+            shuffled_frames.append({'coords': array(coords_shuffled), 'types': array(types), 'L': L, 'D': D})
         
         #set the data
         frames = shuffled_frames
         shuffled_frames = []
-        
-        
-    #perform a check that everything was read in and/or processed correctly
-    for frame in frames:
-        if len(frame['coords']) != N or len(frame['diameters']) != N or frame['L'] is None or len(set(types)) != N_types:
-            raise Exception('Bad data!!!')
-        else:
-            continue
     
     return frames
