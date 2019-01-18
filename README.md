@@ -1,2 +1,2 @@
 # poly_temp_matching
-for performing PTM of xyz files
+must run "pip install asap3" for this to work!
